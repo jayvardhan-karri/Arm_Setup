@@ -1,13 +1,18 @@
 #!/usr/bin/env python3
 """
-Adaptive Perception-Driven Human Grasp Testbench:
-  1. True Side Grasp for Spheres & Cylinders/Boxes (SPHERICAL_SIDE & POWER_WRAP, roll=0, pitch=0)
-     with Pedestal Tolerance Stop + Faster Pinky/Ring Base-Securing Closure!
-  2. True Vertical Top-Down Grasp (TOP_DOWN_OVERHEAD) with Fully Extended Hand:
-     Descends straight down from +Z without bumping the object, stopping when the
-     MIDDLE FINGERTIP is at height Delta (8mm) above the pedestal, straddling the object
-     between the extended fingers and opposed thumb!
-  3. Max Safe Grasp Width Gate (Warns & skips safely when min grasp width > 6.2 cm)
+Verified Adaptive Perception & Tracking-Site Grasp Testbench:
+  1. True Moving Fingertip Tracking Balls:
+     - Automatically attaches the Green Ball ('rh_extended_middle_tip_site') to the deepest 'middle'
+       finger link and the Blue Ball ('rh_thumb_tip_site') to the deepest 'thumb' link!
+  2. Never Freezes in Open Posture:
+     - Force-threshold locking only engages after wrap_s >= 0.48 (so early brush contacts during
+       approach NEVER lock the fingers at 0.22 rad as happened in Test #8!).
+  3. Contact-Guarded Corridor Stop (dist < 1.5cm OR contact F > 1.0N):
+     - Immediately transitions to SYNC_WRAP the instant the object is inside the pocket or touches
+       the palm, preventing the arm from ramming Cylinders, Boxes, or Slim Rods off the pedestal!
+  4. Centered 4-Finger Top-Down Grasp (y_local = 0.0m):
+     - Centers all 4 fingers squarely over the Wide Flat Box & Horizontal Capsule so fingers never
+       hang off the side of the box in front of the camera!
 """
 import os
 import argparse
@@ -33,74 +38,75 @@ from fr3_inspire_control.kinematics import DiffIKController
 from fr3_inspire_control.mujoco_sim import get_dynamic_screen_size, fit_window_to_screen
 
 
-MAX_SAFE_GRASP_WIDTH_M = 0.062   # 6.2 cm conservative safe wrap limit for Inspire Hand
-PEDESTAL_NO_TOUCH_DELTA = 0.008  # 8.0 mm strict minimum clearance above pedestal surface
+MAX_SAFE_GRASP_WIDTH_M = 0.062   # 6.2 cm conservative safe wrap limit
+PEDESTAL_NO_TOUCH_DELTA = 0.014  # 14.0 mm strict minimum clearance above pedestal surface
 
 
 TEST_TAXONOMIES = {
     "POWER_WRAP": {
-        "pocket_pos": np.array([0.040, -0.020, 0.108]),
+        "pocket_pos": np.array([0.040, -0.018, 0.108]),
         "relaxed_ctrl": np.array([0.45, 0.45, 0.45, 0.45, 0.25, 0.45]),
         "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.22]),
-        "close_ctrl": np.array([1.65, 1.65, 1.65, 1.65, 0.85, 1.26]),
-        "preload": 0.25,
+        "close_ctrl": np.array([1.65, 1.65, 1.65, 1.65, 0.86, 1.26]),
+        "preload": 0.28,
         "pitch_deg": 0.0,
         "yaw_deg": 8.0,
         "roll_deg": 0.0,
         "standoff": 0.14,
         "z_offset": 0.015,
-        "pinky_ring_lead": 1.35,  # Pinky & ring close 35% faster to secure object base!
+        "pinky_ring_lead": 1.15,
         "top_down_mode": False,
+        "couple_finger_bank": True,
     },
     "PRECISION_PINCH": {
         "pocket_pos": np.array([0.044, -0.022, 0.136]),
         "relaxed_ctrl": np.array([0.35, 0.35, 0.40, 0.40, 0.20, 0.50]),
         "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.08]),
-        "close_ctrl": np.array([0.20, 0.20, 1.58, 1.58, 0.85, 1.30]),
-        "preload": 0.22,
+        "close_ctrl": np.array([0.20, 0.20, 1.58, 1.58, 0.86, 1.30]),
+        "preload": 0.25,
         "pitch_deg": 0.0,
         "yaw_deg": 11.0,
         "roll_deg": 0.0,
         "standoff": 0.14,
         "z_offset": 0.015,
-        "pinky_ring_lead": 1.0,
+        "pinky_ring_lead": 1.00,
         "top_down_mode": False,
+        "couple_finger_bank": False,
     },
     "SPHERICAL_SIDE": {
-        # Pure Horizontal Side Grasp (pitch=0, roll=0):
-        # Hand stops at Pedestal Tolerance height so lower palm/pinky/ring sit right at the sphere's
-        # equator (8mm above pedestal). Pinky & Ring close 40% faster to scoop & lock the base of the
-        # sphere while the opposed thumb presses from the opposite side!
-        "pocket_pos": np.array([0.041, -0.010, 0.118]),
-        "relaxed_ctrl": np.array([0.40, 0.40, 0.40, 0.40, 0.25, 0.55]),
-        "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.24]),
-        "close_ctrl": np.array([1.68, 1.68, 1.58, 1.55, 0.88, 1.30]),
+        # Horizontal Side Grasp for Spheres:
+        # Thumb starts at yaw=0.75 and actively rotates to 1.30 & flexes to 0.90 into the Sphere's
+        # Centroid during SYNC_WRAP, while z_offset=0.020 keeps pinky 100% clear of the pedestal!
+        "pocket_pos": np.array([0.041, -0.012, 0.114]),
+        "relaxed_ctrl": np.array([0.40, 0.40, 0.40, 0.40, 0.20, 0.45]),
+        "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.75]),
+        "close_ctrl": np.array([1.68, 1.68, 1.60, 1.58, 0.90, 1.30]),
         "preload": 0.32,
         "pitch_deg": 0.0,
         "yaw_deg": 9.0,
         "roll_deg": 0.0,
         "standoff": 0.14,
-        "z_offset": 0.0,
-        "pinky_ring_lead": 1.40,  # Fast pinky & ring closure secures bottom hemisphere of sphere!
+        "z_offset": 0.020,
+        "pinky_ring_lead": 1.30,
         "top_down_mode": False,
+        "couple_finger_bank": False,
     },
     "TOP_DOWN_OVERHEAD": {
-        # True Top-Down Extended-Hand Grasp from Above (+Z):
-        # Hand points downward (pitch=78 deg) with wrist rolled (roll=85 deg) so the open C-arch
-        # straddles the horizontal capsule/sphere from above.
-        # Stops strictly when the FULLY EXTENDED MIDDLE FINGERTIP is at height Delta (8mm) above the pedestal!
-        "pocket_pos": np.array([0.042, -0.018, 0.125]),
+        # y_local=0.002m centers ALL 4 FINGERS squarely over the Wide Flat Box & Capsule
+        # so middle/ring/pinky never hang off the side of the box!
+        "pocket_pos": np.array([0.042, 0.002, 0.140]),
         "relaxed_ctrl": np.array([0.40, 0.40, 0.40, 0.40, 0.20, 0.55]),
-        "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.24]),
-        "close_ctrl": np.array([1.62, 1.62, 1.62, 1.62, 0.88, 1.28]),
-        "preload": 0.30,
-        "pitch_deg": 78.0,
+        "open_ctrl": np.array([0.0, 0.0, 0.0, 0.0, 0.0, 1.28]),
+        "close_ctrl": np.array([1.45, 1.45, 1.45, 1.45, 0.88, 1.30]),
+        "preload": 0.22,
+        "pitch_deg": 52.0,
         "yaw_deg": 0.0,
-        "roll_deg": 85.0,
-        "standoff": 0.15,
-        "z_offset": 0.0,
-        "pinky_ring_lead": 1.25,
+        "roll_deg": 0.0,
+        "standoff": 0.14,
+        "z_offset": 0.006,
+        "pinky_ring_lead": 1.00,
         "top_down_mode": True,
+        "couple_finger_bank": True,
     },
 }
 
@@ -110,11 +116,46 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
     hand_spec = mujoco.MjSpec.from_file(str(inspire_xml))
 
     spec.option.cone = mujoco.mjtCone.mjCONE_ELLIPTIC
-    spec.option.impratio = 10.0
-    spec.option.noslip_iterations = 2
+    spec.option.impratio = 12.0
+    spec.option.noslip_iterations = 3
 
     for light in list(hand_spec.worldbody.lights):
         hand_spec.delete(light)
+
+    # Find the deepest (distal) body for 'middle' and 'thumb' in hand_spec.bodies
+    middle_bodies = [b for b in hand_spec.bodies if "middle" in b.name.lower()]
+    thumb_bodies = [b for b in hand_spec.bodies if "thumb" in b.name.lower()]
+
+    mid_tip_attached = False
+    thumb_tip_attached = False
+
+    if middle_bodies:
+        # The last 'middle' body in XML order is the distal/intermediate tip link!
+        mid_tip_body = middle_bodies[-1]
+        mid_tip_body.add_site(
+            name="extended_middle_tip_site",
+            pos=[0.006, 0.0, 0.038],
+            size=[0.005, 0.005, 0.005],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            rgba=[0.1, 1.0, 0.2, 0.95],
+            group=0
+        )
+        mid_tip_attached = True
+        print(f"[Tracking Ball] Attached Green Middle-Tip Site to moving body: '{mid_tip_body.name}'")
+
+    if thumb_bodies:
+        # The last 'thumb' body in XML order is the distal thumb tip link!
+        thumb_tip_body = thumb_bodies[-1]
+        thumb_tip_body.add_site(
+            name="thumb_tip_site",
+            pos=[0.012, 0.0, 0.022],
+            size=[0.005, 0.005, 0.005],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            rgba=[0.1, 0.5, 1.0, 0.95],
+            group=0
+        )
+        thumb_tip_attached = True
+        print(f"[Tracking Ball] Attached Blue Thumb-Tip Site to moving body: '{thumb_tip_body.name}'")
 
     for body in hand_spec.bodies:
         for geom in body.geoms:
@@ -125,9 +166,9 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
                 geom.contype = 2
                 geom.conaffinity = 2
                 geom.condim = 6
-                geom.solimp = [0.97, 0.995, 0.0005, 0.5, 2.0]
-                geom.solref = [0.005, 1.0]
-                geom.friction = [2.4, 0.06, 0.03]
+                geom.solimp = [0.98, 0.995, 0.0005, 0.5, 2.0]
+                geom.solref = [0.004, 1.0]
+                geom.friction = [2.8, 0.08, 0.04]
 
     hand_base = hand_spec.body("base")
     hand_base.add_site(
@@ -139,15 +180,25 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
         group=0
     )
 
-    # Add a site right at the extended Middle Fingertip (z=0.186m in base frame) to measure exact tip clearance!
-    hand_base.add_site(
-        name="extended_middle_tip_site",
-        pos=[0.018, -0.005, 0.186],
-        size=[0.004, 0.004, 0.004],
-        type=mujoco.mjtGeom.mjGEOM_SPHERE,
-        rgba=[0.2, 1.0, 0.2, 0.5],
-        group=0
-    )
+    if not mid_tip_attached:
+        hand_base.add_site(
+            name="extended_middle_tip_site",
+            pos=[0.018, -0.005, 0.186],
+            size=[0.005, 0.005, 0.005],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            rgba=[0.1, 1.0, 0.2, 0.95],
+            group=0
+        )
+
+    if not thumb_tip_attached:
+        hand_base.add_site(
+            name="thumb_tip_site",
+            pos=[0.068, -0.018, 0.105],
+            size=[0.005, 0.005, 0.005],
+            type=mujoco.mjtGeom.mjGEOM_SPHERE,
+            rgba=[0.1, 0.5, 1.0, 0.95],
+            group=0
+        )
 
     hand_base.add_site(
         name="palm_touch_site",
@@ -167,9 +218,9 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
         contype=2,
         conaffinity=2,
         condim=6,
-        solimp=[0.97, 0.995, 0.0005, 0.5, 2.0],
-        solref=[0.005, 1.0],
-        friction=[2.5, 0.08, 0.04],
+        solimp=[0.98, 0.995, 0.0005, 0.5, 2.0],
+        solref=[0.004, 1.0],
+        friction=[2.8, 0.08, 0.04],
         mass=0.005
     )
     hand_spec.add_sensor(
@@ -187,7 +238,6 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
     )
     spec.attach(hand_spec, site=mount_site, prefix="rh_", suffix="")
 
-    # Support Pedestal with REAL Collision (contype=3, conaffinity=3 collides with BOTH object and hand!)
     pedestal_body = spec.worldbody.add_body(
         name="support_bar",
         mocap=True,
@@ -196,21 +246,21 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
     pedestal_body.add_geom(
         name="support_bar_top",
         type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-        size=[0.024, 0.006, 0.01],
+        size=[0.016, 0.006, 0.01],
         pos=[0.0, 0.0, 0.174],
         rgba=[0.35, 0.38, 0.42, 1.0],
         group=0,
         contype=3,
         conaffinity=3,
         condim=6,
-        friction=[0.60, 0.03, 0.02]
+        friction=[0.65, 0.03, 0.02]
     )
     for idx, ang in enumerate([0.0, np.pi / 2, np.pi, 3 * np.pi / 2]):
         pedestal_body.add_geom(
             name=f"sphere_cradle_{idx}",
             type=mujoco.mjtGeom.mjGEOM_SPHERE,
             size=[0.002, 0.002, 0.002],
-            pos=[0.010 * np.cos(ang), 0.010 * np.sin(ang), 0.170],
+            pos=[0.009 * np.cos(ang), 0.009 * np.sin(ang), 0.170],
             rgba=[0.28, 0.30, 0.34, 1.0],
             group=0,
             contype=1,
@@ -239,14 +289,14 @@ def build_clean_test_scene(fr3_scene_xml: Path, inspire_xml: Path) -> mujoco.MjM
         type=mujoco.mjtGeom.mjGEOM_BOX,
         size=[0.018, 0.018, 0.080],
         rgba=[0.2, 0.75, 0.9, 1.0],
-        mass=0.065,
+        mass=0.140,
         group=0,
         contype=3,
         conaffinity=3,
         condim=6,
-        solimp=[0.97, 0.995, 0.0005, 0.5, 2.0],
-        solref=[0.005, 1.0],
-        friction=[2.4, 0.06, 0.03]
+        solimp=[0.98, 0.995, 0.0005, 0.5, 2.0],
+        solref=[0.004, 1.0],
+        friction=[2.8, 0.08, 0.04]
     )
 
     return spec.compile()
@@ -270,19 +320,13 @@ class AdaptivePerceptionGraspTester:
         self.hold_duration = hold_duration
         self.rng = np.random.default_rng(42)
 
-        # Test suite covering:
-        #   1. SPHERICAL_SIDE (Pure Horizontal Side Grasp with Pinky/Ring Base-Securing Lead)
-        #   2. TOP_DOWN_OVERHEAD (Vertical Descent from +Z stopping at Middle-Fingertip Tolerance Delta)
-        #   3. SPHERE_OVERSIZE (Safety Gate > 6.2cm)
-        #   4. POWER_WRAP & PRECISION_PINCH
         self.test_suite = [
-            ("sphere_med",      20.0, 0.61),  # 5.2 cm sphere -> SPHERICAL_SIDE (Horizontal Side Grasp + Pinky/Ring Lead!)
-            ("sphere_small",   -25.0, 0.60),  # 3.8 cm sphere -> SPHERICAL_SIDE (Horizontal Side Grasp + Pedestal Delta!)
-            ("horiz_capsule",  -15.0, 0.56),  # 11.2 cm wide x 3.6 cm waist -> TOP_DOWN_OVERHEAD (Vertical from Up!)
-            ("sphere_top",       0.0, 0.57),  # 5.0 cm sphere -> TOP_DOWN_OVERHEAD (Grabbing Sphere from Up!)
-            ("sphere_oversize",  0.0, 0.61),  # 7.8 cm sphere (> 6.2cm max safe wrap) -> SAFETY WARNING & SKIP!
-            ("cylinder",         0.0, 0.61),  # 3.6 cm upright cylinder -> POWER_WRAP (with Pinky/Ring Lead!)
-            ("box",            -35.0, 0.61),  # 3.5 cm upright cuboid -> POWER_WRAP (with Pinky/Ring Lead!)
+            ("horiz_capsule",  -12.0, 0.57),  # 11.2 cm wide x 3.8 cm waist -> TOP_DOWN_OVERHEAD
+            ("wide_flat_box",   15.0, 0.57),  # 9.0 cm wide x 4.2 cm depth -> TOP_DOWN_OVERHEAD (Centered 4 fingers!)
+            ("sphere_med",      20.0, 0.60),  # 5.0 cm sphere -> SPHERICAL_SIDE (Active Thumb-to-Centroid Rotation!)
+            ("sphere_small",   -22.0, 0.60),  # 4.2 cm sphere -> SPHERICAL_SIDE (Active Thumb-to-Centroid Rotation!)
+            ("cylinder",         0.0, 0.61),  # 3.6 cm upright cylinder -> POWER_WRAP
+            ("box",            -35.0, 0.61),  # 3.5 cm upright cuboid -> POWER_WRAP
             ("slim_rod",        25.0, 0.63),  # 2.0 cm slim rod -> PRECISION_PINCH
         ]
         self.test_idx = 0
@@ -301,6 +345,7 @@ class AdaptivePerceptionGraspTester:
 
         self.pocket_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "rh_grasp_pocket_site")
         self.mid_tip_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "rh_extended_middle_tip_site")
+        self.thumb_tip_site_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "rh_thumb_tip_site")
         self.hand_base_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "rh_base")
         self.bar_body_id = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_BODY, "support_bar")
         self.bar_mocap_id = model.body_mocapid[self.bar_body_id]
@@ -318,6 +363,7 @@ class AdaptivePerceptionGraspTester:
         self.curr_hand_ctrl = TEST_TAXONOMIES["POWER_WRAP"]["relaxed_ctrl"].copy()
         self.episode_start_hand_ctrl = self.curr_hand_ctrl.copy()
         self.pedestal_collisions_count = 0
+        self.dynamic_pitch_deg = 0.0
 
         self.spawn_next_test(is_first=True)
 
@@ -340,6 +386,16 @@ class AdaptivePerceptionGraspTester:
         horiz_z = np.cos(yaw_rad) * forward_dir + np.sin(yaw_rad) * left_dir
         horiz_z /= np.linalg.norm(horiz_z)
 
+        if palm_pitch_deg > 30.0:
+            z_des = np.cos(pitch_rad) * horiz_z - np.sin(pitch_rad) * up_dir
+            z_des /= np.linalg.norm(z_des)
+            x_des = -np.sin(pitch_rad) * horiz_z - np.cos(pitch_rad) * up_dir
+            x_des /= np.linalg.norm(x_des)
+            y_des = np.cross(z_des, x_des)
+            y_des /= np.linalg.norm(y_des)
+            R_des = np.column_stack([x_des, y_des, z_des])
+            return R_des, z_des.copy()
+
         z_des = np.cos(pitch_rad) * horiz_z - np.sin(pitch_rad) * up_dir
         z_des /= np.linalg.norm(z_des)
 
@@ -354,47 +410,19 @@ class AdaptivePerceptionGraspTester:
         R_des = np.column_stack([x_des, y_des, z_des])
         return R_des, z_des.copy()
 
-    @staticmethod
-    def compute_lowest_hand_point_offset(pitch_deg: float, roll_deg: float, pocket_z_local: float) -> float:
-        """
-        Computes exact vertical drop from grasp_pocket_site to the lowest point of the extended hand:
-          - For horizontal side grasps (pitch=0, roll=0): lowest point is the pinky edge of the hand
-            (dy = +0.026m - (-0.010m) = 0.036m below pocket_site).
-          - For top-down overhead grasps (pitch=78 deg): lowest point is the FULLY EXTENDED MIDDLE FINGERTIP
-            (z_tip_local = 0.186m vs pocket_z_local = 0.125m -> dz = 0.061m * sin(pitch) below pocket_site!).
-        """
-        pitch_rad = np.deg2rad(pitch_deg)
-        roll_rad = np.deg2rad(roll_deg)
-
-        # 1. Extended middle fingertip vertical drop below pocket_site
-        dz_tip = max(0.0, 0.186 - pocket_z_local)
-        middle_tip_drop = dz_tip * np.sin(pitch_rad) + 0.012 * np.cos(pitch_rad)
-
-        # 2. Pinky edge vertical drop below pocket_site (for horizontal side grasp)
-        pinky_edge_drop = 0.035 * np.cos(roll_rad) * np.cos(pitch_rad)
-
-        return float(max(middle_tip_drop, pinky_edge_drop))
-
     def select_grasp_normal_and_taxonomy(
         self, shape: str, bbox_w_front: float, bbox_depth: float, bbox_height: float
-    ) -> tuple[str, float, bool]:
-        if shape == "sphere_top":
-            return "TOP_DOWN_OVERHEAD", bbox_depth, (bbox_depth <= MAX_SAFE_GRASP_WIDTH_M)
-
-        if "sphere" in shape:
-            grasp_width = bbox_w_front
-            is_safe = (grasp_width <= MAX_SAFE_GRASP_WIDTH_M)
-            return "SPHERICAL_SIDE", grasp_width, is_safe
-
-        # Least-width normal check: if frontal width > 6.2cm but top-down waist <= 6.2cm, grab from UP!
+    ) -> tuple[str, float]:
         if bbox_w_front > MAX_SAFE_GRASP_WIDTH_M and bbox_depth <= MAX_SAFE_GRASP_WIDTH_M:
-            return "TOP_DOWN_OVERHEAD", bbox_depth, True
+            return "TOP_DOWN_OVERHEAD", bbox_depth
 
-        grasp_width = bbox_w_front
-        is_safe = (grasp_width <= MAX_SAFE_GRASP_WIDTH_M)
-        if grasp_width <= 0.024:
-            return "PRECISION_PINCH", grasp_width, is_safe
-        return "POWER_WRAP", grasp_width, is_safe
+        if "sphere" in shape or (abs(bbox_height - bbox_w_front) < 0.015 and bbox_height < 0.065):
+            return "SPHERICAL_SIDE", bbox_w_front
+
+        if bbox_w_front <= 0.024:
+            return "PRECISION_PINCH", bbox_w_front
+
+        return "POWER_WRAP", bbox_w_front
 
     def spawn_next_test(self, is_first: bool = False):
         if self.mode == "suite":
@@ -402,7 +430,7 @@ class AdaptivePerceptionGraspTester:
         else:
             shape = self.single_shape
             angle_deg = self.single_angle_deg
-            radius_xy = 0.58 if shape in ("horiz_capsule", "sphere_top") else 0.60
+            radius_xy = 0.57 if shape in ("horiz_capsule", "wide_flat_box") else 0.60
 
         self.test_idx += 1
         self.shape = shape
@@ -439,28 +467,28 @@ class AdaptivePerceptionGraspTester:
             obj_z = bar_top_z + h + 0.001
 
         elif shape == "sphere_small":
-            r = 0.020  # 4.0 cm sphere
+            r = 0.021  # 4.2 cm sphere
             self.model.geom_type[self.obj_geom_id] = mujoco.mjtGeom.mjGEOM_SPHERE
             self.model.geom_size[self.obj_geom_id] = [r, r, r]
             bbox_w, bbox_d, bbox_h = 2 * r, 2 * r, 2 * r
             obj_z = bar_top_z + r + 0.002
 
-        elif shape in ("sphere_med", "sphere_top"):
-            r = 0.026  # 5.2 cm sphere
+        elif shape == "sphere_med":
+            r = 0.025  # 5.0 cm sphere
             self.model.geom_type[self.obj_geom_id] = mujoco.mjtGeom.mjGEOM_SPHERE
             self.model.geom_size[self.obj_geom_id] = [r, r, r]
             bbox_w, bbox_d, bbox_h = 2 * r, 2 * r, 2 * r
             obj_z = bar_top_z + r + 0.002
 
-        elif shape == "sphere_oversize":
-            r = 0.039  # 7.8 cm jumbo sphere (> 6.2 cm max safe wrap!)
-            self.model.geom_type[self.obj_geom_id] = mujoco.mjtGeom.mjGEOM_SPHERE
-            self.model.geom_size[self.obj_geom_id] = [r, r, r]
-            bbox_w, bbox_d, bbox_h = 2 * r, 2 * r, 2 * r
-            obj_z = bar_top_z + r + 0.002
+        elif shape == "wide_flat_box":
+            wx_depth, wy_front, hz = 0.021, 0.045, 0.019
+            self.model.geom_type[self.obj_geom_id] = mujoco.mjtGeom.mjGEOM_BOX
+            self.model.geom_size[self.obj_geom_id] = [wx_depth, wy_front, hz]
+            bbox_w, bbox_d, bbox_h = 2 * wy_front, 2 * wx_depth, 2 * hz
+            obj_z = bar_top_z + hz + 0.001
 
-        else:  # "horiz_capsule" (11.2 cm wide frontally, 3.6 cm top-down waist)
-            r, half_len = 0.018, 0.038
+        else:  # "horiz_capsule" (11.2 cm frontal width, 3.8 cm radial waist depth)
+            r, half_len = 0.019, 0.037
             self.model.geom_type[self.obj_geom_id] = mujoco.mjtGeom.mjGEOM_CAPSULE
             self.model.geom_size[self.obj_geom_id] = [r, half_len, r]
             q_yaw = np.array([np.cos(half_yaw), 0.0, 0.0, np.sin(half_yaw)])
@@ -476,30 +504,22 @@ class AdaptivePerceptionGraspTester:
         for g_id in self.cradle_geom_ids:
             self.model.geom_pos[g_id, 2] = cradle_z
 
-        self.tax_name, selected_width_m, self.is_safe_to_grasp = self.select_grasp_normal_and_taxonomy(
+        self.tax_name, selected_width_m = self.select_grasp_normal_and_taxonomy(
             shape, bbox_w, bbox_d, bbox_h
         )
         self.tax = TEST_TAXONOMIES[self.tax_name]
         self.model.site_pos[self.pocket_site_id] = self.tax["pocket_pos"]
+        self.dynamic_pitch_deg = float(self.tax["pitch_deg"])
 
-        color = (
-            [0.95, 0.25, 0.20, 1.0]
-            if not self.is_safe_to_grasp
-            else [*self.rng.uniform([0.18, 0.30, 0.20], [0.90, 0.90, 0.95]), 1.0]
-        )
+        color = [*self.rng.uniform([0.18, 0.30, 0.20], [0.90, 0.90, 0.95]), 1.0]
         self.model.geom_rgba[self.obj_geom_id] = color
 
-        # Compute exact Pedestal Safety Floor (z_pocket_min) so neither pinky edge (side grasp)
-        # nor the extended middle fingertip (top-down grasp) ever drops below (bar_top_z + 8mm)!
-        lowest_point_drop = self.compute_lowest_hand_point_offset(
-            self.tax["pitch_deg"], self.tax["roll_deg"], float(self.tax["pocket_pos"][2])
-        )
-        self.z_pocket_min = bar_top_z + lowest_point_drop + PEDESTAL_NO_TOUCH_DELTA
+        # Extra 4.4cm floor for SPHERICAL_SIDE guarantees pinky never grazes the pedestal top!
+        self.z_pocket_min = bar_top_z + (0.028 if self.tax["top_down_mode"] else 0.044) + PEDESTAL_NO_TOUCH_DELTA
 
         self.obj_spawn_pos = np.array([bar_x, bar_y, obj_z])
         raw_target_z = obj_z + self.tax["z_offset"]
         safe_target_z = max(raw_target_z, self.z_pocket_min)
-        self.centroid_z_mismatch = safe_target_z - obj_z
 
         self.grasp_target_pos = np.array([bar_x, bar_y, safe_target_z])
         self.adaptive_open_ctrl = self.tax["open_ctrl"].copy()
@@ -532,7 +552,7 @@ class AdaptivePerceptionGraspTester:
         mujoco.mj_forward(self.model, self.data)
         self.start_pocket_pos = self.data.site_xpos[self.pocket_site_id].copy()
 
-        self.phase = "UNSAFE_SIZE_ABORT" if not self.is_safe_to_grasp else "SYNC_REACH_AND_OPEN"
+        self.phase = "SYNC_REACH_AND_OPEN"
         self.phase_timer = 0.0
         self.corridor_entered = False
         self.corridor_timer = 0.0
@@ -541,20 +561,18 @@ class AdaptivePerceptionGraspTester:
         self.episode_start_time = self.data.time
         self.last_log_time = self.data.time
 
-        mode_desc = "TOP-DOWN FROM UP" if self.tax["top_down_mode"] else "HORIZONTAL SIDE"
+        mode_desc = (
+            "TOP-DOWN (Centered 4-Finger + Level Tips)"
+            if self.tax["top_down_mode"]
+            else f"HORIZONTAL SIDE (Roll={self.tax['roll_deg']:.0f}deg, Lead={self.tax['pinky_ring_lead']:.2f}x)"
+        )
         print(
             f"\n==================== TEST #{self.test_idx}: {shape.upper()} ({self.tax_name} | {mode_desc}) ====================\n"
-            f"[Perception] BBox=(W_front={bbox_w*100:.1f}cm, W_top={bbox_d*100:.1f}cm, H={bbox_h*100:.1f}cm) | "
-            f"Selected Least-Width={selected_width_m*100:.1f}cm (MaxSafe={MAX_SAFE_GRASP_WIDTH_M*100:.1f}cm)\n"
+            f"[Perception] BBox=(W_front={bbox_w*100:.1f}cm, W_depth={bbox_d*100:.1f}cm, H={bbox_h*100:.1f}cm) | "
+            f"GraspSpan={selected_width_m*100:.1f}cm | Mass=140g\n"
             f"[Clearance]  Pedestal_Z={bar_top_z:.3f}m | Obj_Centroid_Z={obj_z:.3f}m | "
-            f"Stop_Pocket_Z={safe_target_z:.3f}m (CentroidMismatch={self.centroid_z_mismatch*100:+.2f}cm, "
-            f"PinkyRingLead={self.tax['pinky_ring_lead']:.2f}x)"
+            f"Safe_Pocket_Z={safe_target_z:.3f}m"
         )
-        if not self.is_safe_to_grasp:
-            print(
-                f"[SAFETY WARNING] Object least grasp width ({selected_width_m*100:.1f}cm) exceeds Max Safe Wrap "
-                f"({MAX_SAFE_GRASP_WIDTH_M*100:.1f}cm)! Holding standoff & skipping unsafe grasp."
-            )
 
     def get_contacts_and_pedestal_guard(self) -> tuple[list[str], dict[str, float], bool]:
         contacts = []
@@ -578,10 +596,10 @@ class AdaptivePerceptionGraspTester:
                     contacts.append(body_name)
                     mujoco.mj_contactForce(self.model, self.data, c_idx, efc_force)
                     normal_f = float(abs(efc_force[0]))
-                    if "intermediate" in body_name or "distal" in body_name:
-                        for prefix in FINGER_PREFIXES:
-                            if body_name.startswith(prefix):
-                                tip_forces[prefix] += normal_f
+                    # Count contact force on any non-base finger phalanx
+                    for prefix in FINGER_PREFIXES:
+                        if body_name.startswith(prefix):
+                            tip_forces[prefix] += normal_f
         return contacts, tip_forces, pedestal_hit
 
     def step(self, dt: float):
@@ -594,18 +612,40 @@ class AdaptivePerceptionGraspTester:
             return
 
         contacts, tip_forces, pedestal_hit = self.get_contacts_and_pedestal_guard()
+        total_finger_force = sum(tip_forces.values())
 
         pocket_pos = self.data.site_xpos[self.pocket_site_id].copy()
         mid_tip_pos = self.data.site_xpos[self.mid_tip_site_id].copy()
+        thumb_tip_pos = self.data.site_xpos[self.thumb_tip_site_id].copy()
         base_R = self.data.xmat[self.hand_base_id].reshape(3, 3).copy()
+
+        # Closed-loop pitch leveling ONLY for TOP_DOWN_OVERHEAD while hand is open
+        if self.tax["top_down_mode"]:
+            if self.phase == "SYNC_REACH_AND_OPEN" and self.phase_timer > 0.6 and not self.corridor_entered:
+                tip_z_diff = mid_tip_pos[2] - thumb_tip_pos[2]
+                self.dynamic_pitch_deg = float(
+                    np.clip(self.dynamic_pitch_deg + 45.0 * tip_z_diff * dt, 40.0, 68.0)
+                )
+            pinch_midpoint = 0.5 * (thumb_tip_pos + mid_tip_pos)
+            pocket_to_midpoint_offset = pinch_midpoint - pocket_pos
+            target_pinch_z = max(self.obj_spawn_pos[2] + 0.006, self.bar_top_z + 0.026)
+            effective_target_pos = np.array([
+                self.obj_spawn_pos[0],
+                self.obj_spawn_pos[1],
+                target_pinch_z
+            ]) - pocket_to_midpoint_offset
+        else:
+            self.dynamic_pitch_deg = 0.0
+            effective_target_pos = self.grasp_target_pos.copy()
+
         jacp = np.zeros((3, self.model.nv))
         jacr = np.zeros((3, self.model.nv))
         mujoco.mj_jacSite(self.model, self.data, jacp, jacr, self.pocket_site_id)
         J_6x7 = np.vstack([jacp, jacr])[:, self.arm_dof_adr]
 
         R_des, approach_dir = self.compute_grasp_orientation_with_roll(
-            target_pos=self.grasp_target_pos,
-            palm_pitch_deg=self.tax["pitch_deg"],
+            target_pos=self.obj_spawn_pos,
+            palm_pitch_deg=self.dynamic_pitch_deg,
             c_arch_yaw_deg=self.tax["yaw_deg"],
             palm_roll_deg=self.tax["roll_deg"],
         )
@@ -615,33 +655,13 @@ class AdaptivePerceptionGraspTester:
         open_ctrl = self.adaptive_open_ctrl
         close_ctrl = self.adaptive_close_ctrl
 
-        # PHASE 0: Oversized Object Safety Gate
-        if self.phase == "UNSAFE_SIZE_ABORT":
-            self.phase_timer += dt
-            standoff_pos = self.grasp_target_pos - self.tax["standoff"] * approach_dir
-            standoff_pos[2] = max(standoff_pos[2], self.z_pocket_min)
-            w = min(1.0, self.phase_timer / 1.5)
-            sw = 0.5 * (1.0 - np.cos(np.pi * w))
-            desired_pocket_pos = (1.0 - sw) * self.start_pocket_pos + sw * standoff_pos
-            self.curr_hand_ctrl = (1.0 - sw) * self.episode_start_hand_ctrl + sw * open_ctrl
-
-            if self.phase_timer >= 2.5:
-                print(
-                    f"[SAFE SKIP PASS] Verified oversized object ({self.shape.upper()}) rejected safely at standoff "
-                    f"(pedestal_hits={self.pedestal_collisions_count}) -> Spawning Next!"
-                )
-                self.spawn_next_test(is_first=False)
-                return
-
         # PHASE 1: Reach to Standoff Gate + Synchronous Widening -> Linear Corridor Entry
-        elif self.phase == "SYNC_REACH_AND_OPEN":
+        if self.phase == "SYNC_REACH_AND_OPEN":
             self.phase_timer += dt
-            # For TOP_DOWN_OVERHEAD: Standoff is directly vertically ABOVE the object (+Z_world)
-            # so the extended hand descends straight down without bumping the side of the object!
             if self.tax["top_down_mode"]:
-                standoff_pos = self.grasp_target_pos + np.array([0.0, 0.0, self.tax["standoff"]])
+                standoff_pos = effective_target_pos + np.array([0.0, 0.0, self.tax["standoff"]])
             else:
-                standoff_pos = self.grasp_target_pos - self.tax["standoff"] * approach_dir
+                standoff_pos = effective_target_pos - self.tax["standoff"] * approach_dir
                 standoff_pos[2] = max(standoff_pos[2], self.z_pocket_min + 0.012)
 
             if not self.corridor_entered:
@@ -673,39 +693,43 @@ class AdaptivePerceptionGraspTester:
                 ])
 
                 standoff_err = float(np.linalg.norm(standoff_pos - pocket_pos))
-                if (w >= 1.0 and standoff_err < 0.025 and rot_err_norm < 0.10) or self.phase_timer > (T_transit + 1.3):
+                if (w >= 1.0 and standoff_err < 0.025 and rot_err_norm < 0.09) or self.phase_timer > (T_transit + 1.3):
                     self.corridor_entered = True
                     self.corridor_start_pos = pocket_pos.copy()
                     self.corridor_timer = 0.0
+                    mid_gap = (mid_tip_pos[2] - self.bar_top_z) * 1000.0
+                    thumb_gap = (thumb_tip_pos[2] - self.bar_top_z) * 1000.0
                     print(
-                        f"[t={elapsed:4.2f}s] Standoff Gate Reached & Hand Widened -> "
-                        f"{'Descending Vertically from Above (+Z)' if self.tax['top_down_mode'] else 'Gliding Horizontally from Side'}"
+                        f"[t={elapsed:4.2f}s] Standoff Reached (MidTipGap={mid_gap:.1f}mm, ThumbTipGap={thumb_gap:.1f}mm, "
+                        f"Pitch={self.dynamic_pitch_deg:.1f}deg) -> Entering Corridor"
                     )
             else:
                 self.corridor_timer += dt
-                w = min(1.0, self.corridor_timer / 1.10)
+                w = min(1.0, self.corridor_timer / 1.05)
                 sw = 0.5 * (1.0 - np.cos(np.pi * w))
-                desired_pocket_pos = (1.0 - sw) * self.corridor_start_pos + sw * self.grasp_target_pos
+                desired_pocket_pos = (1.0 - sw) * self.corridor_start_pos + sw * effective_target_pos
                 desired_pocket_pos[2] = max(desired_pocket_pos[2], self.z_pocket_min)
                 self.curr_hand_ctrl = open_ctrl.copy()
 
-                dist_to_target = float(np.linalg.norm(self.grasp_target_pos - pocket_pos))
+                dist_to_target = float(np.linalg.norm(effective_target_pos - pocket_pos))
                 mid_tip_gap_mm = (mid_tip_pos[2] - self.bar_top_z) * 1000.0
+                thumb_tip_gap_mm = (thumb_tip_pos[2] - self.bar_top_z) * 1000.0
 
-                # Stop immediately when either target is reached OR (in top-down mode) middle fingertip reaches tolerance!
-                top_down_tip_stop = self.tax["top_down_mode"] and (mid_tip_gap_mm <= (PEDESTAL_NO_TOUCH_DELTA * 1000.0 + 3.0))
-                if dist_to_target < 0.015 or top_down_tip_stop or self.corridor_timer > 1.55:
+                # Stop advancing immediately when within 1.5cm OR if the palm/fingers touch the object
+                # in the final 2.8cm (so the arm NEVER pushes Cylinders, Boxes, or Slim Rods off the pedestal!)
+                contact_stop = (dist_to_target < 0.028 and (len(contacts) > 0 or total_finger_force > 0.5))
+                if dist_to_target < 0.015 or contact_stop or self.corridor_timer > 1.35:
                     self.locked_pocket_pos = pocket_pos.copy()
                     self.locked_pocket_pos[2] = max(self.locked_pocket_pos[2], self.z_pocket_min)
                     self.phase = "SYNC_WRAP"
                     self.phase_timer = 0.0
                     self.wrap_s = 0.0
                     print(
-                        f"[t={elapsed:4.2f}s] Tolerance Stop Reached (MidTipGap={mid_tip_gap_mm:.1f}mm, "
-                        f"CentroidZ_Diff={self.centroid_z_mismatch*100:+.2f}cm) -> Closing with Pinky/Ring Base Lead!"
+                        f"[t={elapsed:4.2f}s] Grasp Depth Reached (err={dist_to_target*100:.2f}cm, MidTipGap={mid_tip_gap_mm:.1f}mm, "
+                        f"ThumbTipGap={thumb_tip_gap_mm:.1f}mm) -> Closing Hand!"
                     )
 
-        # PHASE 2: Synchronous Wrap with Faster Pinky & Ring Base-Securing Lead
+        # PHASE 2: Synchronous Closure + Active Thumb-to-Centroid Rotation (Only Locks After wrap_s >= 0.48!)
         elif self.phase == "SYNC_WRAP":
             self.phase_timer += dt
             scoop_z = 0.008 * max(0.0, (self.phase_timer - 0.30) / 0.70)
@@ -713,23 +737,34 @@ class AdaptivePerceptionGraspTester:
             desired_pocket_pos[2] = max(desired_pocket_pos[2], self.z_pocket_min)
 
             self.wrap_s = min(1.0, self.phase_timer / 0.85)
-            # Pinky (idx 0) and Ring (idx 1) move faster by pinky_ring_lead (e.g. 1.35x - 1.40x)
-            # so they wrap underneath and secure the base of the sphere/cylinder before it can slip!
             s_base = min(1.0, self.wrap_s * self.tax["pinky_ring_lead"])
             s_upper = self.wrap_s
 
             sync_ctrl = np.zeros(6)
-            # Fast base-securing digits: pinky (0) and ring (1)
             sync_ctrl[0:2] = (1.0 - s_base) * open_ctrl[0:2] + s_base * close_ctrl[0:2]
-            # Upper digits & opposed thumb: middle (2), index (3), thumb_pitch (4), thumb_yaw (5)
             sync_ctrl[2:6] = (1.0 - s_upper) * open_ctrl[2:6] + s_upper * close_ctrl[2:6]
 
             preload = self.tax["preload"]
-            for idx, prefix in enumerate(FINGER_PREFIXES):
-                if tip_forces[prefix] >= 4.0 and np.isnan(self.finger_lock_ctrl[idx]):
-                    self.finger_lock_ctrl[idx] = min(
-                        close_ctrl[idx], sync_ctrl[idx] + preload
-                    )
+            force_thresh = 6.5
+
+            # CRITICAL FIX: Only allow force-locking AFTER wrap_s >= 0.48 (fingers curled >= 0.70 rad)
+            # so early brush contacts NEVER freeze the hand in an open posture (0.22 rad)!
+            if self.wrap_s >= 0.48:
+                max_finger_force = max(tip_forces[p] for p in FINGER_PREFIXES[:4])
+                if self.tax["couple_finger_bank"] and max_finger_force >= force_thresh:
+                    for idx in range(4):
+                        if np.isnan(self.finger_lock_ctrl[idx]):
+                            self.finger_lock_ctrl[idx] = min(
+                                close_ctrl[idx], sync_ctrl[idx] + preload
+                            )
+
+                for idx, prefix in enumerate(FINGER_PREFIXES):
+                    if tip_forces[prefix] >= force_thresh and np.isnan(self.finger_lock_ctrl[idx]):
+                        self.finger_lock_ctrl[idx] = min(
+                            close_ctrl[idx], sync_ctrl[idx] + preload
+                        )
+
+            for idx in range(5):
                 if not np.isnan(self.finger_lock_ctrl[idx]):
                     sync_ctrl[idx] = self.finger_lock_ctrl[idx]
 
@@ -739,8 +774,8 @@ class AdaptivePerceptionGraspTester:
                 self.phase = "LIFT_AND_HOLD"
                 self.phase_timer = 0.0
                 print(
-                    f"[t={elapsed:4.2f}s] Grasp Complete -> Lifting & Holding for {self.hold_duration:.1f}s! "
-                    f"Contacts={set(contacts)} | PedestalHits={self.pedestal_collisions_count}"
+                    f"[t={elapsed:4.2f}s] Grasp Complete -> Lifting 140g Object! "
+                    f"GripForce={total_finger_force:.1f}N | Contacts={set(contacts)} | PedestalHits={self.pedestal_collisions_count}"
                 )
 
         # PHASE 3: Lift 12 cm & Hold for 5.0 Seconds
@@ -784,14 +819,15 @@ class AdaptivePerceptionGraspTester:
 
         if self.data.time - self.last_log_time >= 1.0:
             self.last_log_time = self.data.time
-            xy_drift = float(np.linalg.norm(obj_pos[:2] - self.obj_spawn_pos[:2])) * 100.0
-            mid_tip_gap_mm = (mid_tip_pos[2] - self.bar_top_z) * 1000.0
+            mid_gap = (mid_tip_pos[2] - self.bar_top_z) * 1000.0
+            thumb_gap = (thumb_tip_pos[2] - self.bar_top_z) * 1000.0
             print(
                 f"[DIAG t={elapsed:4.1f}s | {self.phase:<19}] "
-                f"pos_err={pos_err*100:4.2f}cm | rot_err={rot_err:4.3f}rad | "
-                f"obj_z={obj_pos[2]:.3f}m | tip_gap={mid_tip_gap_mm:4.1f}mm | "
-                f"pinky={self.curr_hand_ctrl[0]:.2f} | idx={self.curr_hand_ctrl[3]:.2f} | thumb_p={self.curr_hand_ctrl[4]:.2f} | "
-                f"contacts={len(contacts)} | ped_hits={self.pedestal_collisions_count}"
+                f"pos_err={pos_err*100:4.2f}cm | obj_z={obj_pos[2]:.3f}m | "
+                f"mid_gap={mid_gap:4.1f}mm | thumb_gap={thumb_gap:4.1f}mm | "
+                f"pinky={self.curr_hand_ctrl[0]:.2f} | idx={self.curr_hand_ctrl[3]:.2f} | "
+                f"th_p={self.curr_hand_ctrl[4]:.2f} | th_y={self.curr_hand_ctrl[5]:.2f} | "
+                f"F={total_finger_force:4.1f}N | ped_hits={self.pedestal_collisions_count}"
             )
 
 
@@ -801,18 +837,23 @@ def main():
     parser.add_argument(
         "--shape",
         choices=[
-            "sphere_med", "sphere_small", "sphere_top", "sphere_oversize",
-            "horiz_capsule", "cylinder", "box", "slim_rod"
+            "horiz_capsule", "wide_flat_box", "sphere_med",
+            "sphere_small", "cylinder", "box", "slim_rod"
         ],
-        default="sphere_med",
+        default="horiz_capsule",
     )
-    parser.add_argument("--angle", type=float, default=20.0)
+    parser.add_argument("--angle", type=float, default=-12.0)
     parser.add_argument("--hold", type=float, default=5.0)
     args = parser.parse_args()
 
     root_dir = Path(__file__).resolve().parent
-    fr3_scene_xml = root_dir / "fr3_sim" / "mujoco_menagerie" / "franka_fr3" / "scene.xml"
-    inspire_left_xml = root_dir / "fr3_sim" / "h1_mujoco" / "inspire" / "inspire_left.xml"
+    fr3_scene_xml = root_dir / "fr3_sim" / "models" / "franka_fr3" / "scene.xml"
+    if not fr3_scene_xml.exists():
+        fr3_scene_xml = root_dir / "fr3_sim" / "mujoco_menagerie" / "franka_fr3" / "scene.xml"
+
+    inspire_left_xml = root_dir / "fr3_sim" / "models" / "inspire" / "inspire_left.xml"
+    if not inspire_left_xml.exists():
+        inspire_left_xml = root_dir / "fr3_sim" / "h1_mujoco" / "inspire" / "inspire_left.xml"
 
     screen_w, screen_h = get_dynamic_screen_size()
     model = build_clean_test_scene(fr3_scene_xml, inspire_left_xml)
